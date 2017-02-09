@@ -18,7 +18,18 @@
 # Or you may use pre-transpiled go code like this:
 #   go run rye__/jim/jim/ryemain.go  :8080 webs.conf
 
-from go import net/http, os, time
+from go import net/http, os, path/filepath, syscall, time
+
+# TODO: See https://play.golang.org/p/dXBizm4xl3
+def CheckPublicPermissions(p):
+  p = filepath.Clean(p)
+  if (os.Stat(p).Mode() & 0004) != 0004:
+    raise 'File not public readable: 0%o %q' % (os.Stat(p).Mode(), p)
+  d = filepath.Dir(p)
+  while d != '.' and d != '/' and d != '':
+    if (os.Stat(d).Mode() & 0005) != 0005:
+      raise 'Dir not public readable & executable: 0%o %q' % (os.Stat(d).Mode(), d)
+    d = filepath.Dir(d)
 
 def main(args):
   bindHostColonPort, confFile = args
@@ -31,16 +42,23 @@ def main(args):
     if words:
       webDir = words[0]
       for pattern in words[1:]:
-        def makeLoggingWrapper(pattern, webDir, handler):
-          def loggingWrapper(w, r):
+        def makeWrapper(pattern, webDir, handler):
+          def wrapper(w, r):
             print >>os.Stderr, '%s (%s == %s) %q' % (
                 time.Now().Format(time.Stamp), webDir, pattern, r.RequestURI)
+            try:
+              CheckPublicPermissions(filepath.Join(webDir, r.URL.Path))
+            except as e:
+              http.NotFound(w, r)
+              print >> os.Stderr, 'ERROR %q (%s == %s) %q' % (e, webDir, pattern, r.RequestURI)
+              return
             handler.ServeHTTP(w, r)
-          return loggingWrapper
+          return wrapper
 
         handler = http.FileServer(go_cast(http.Dir, webDir))
-        http.HandleFunc(pattern, makeLoggingWrapper(pattern, webDir, handler))
+        http.HandleFunc(pattern, makeWrapper(pattern, webDir, handler))
         print >>os.Stderr, '# %q handles %q' % (webDir, pattern)
 
   print >>os.Stderr, '# Starting Server at %s' % time.Now().Format(time.Stamp)
+
   http.ListenAndServe(bindHostColonPort, None)
